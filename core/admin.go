@@ -61,6 +61,10 @@ const (
 	RAM  Class = "RAM"
 )
 
+func (p *IPubDBAdmin) Admin() pulsaradmin.Client {
+	return p.admin
+}
+
 // PushBucket creates new logical tenant if not a update request
 func (p *IPubDBAdmin) PushBucket(ctx context.Context, c *ICreateBucket) error {
 	p.mu.Lock()
