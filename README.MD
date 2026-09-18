@@ -25,7 +25,7 @@ db.SetCache(map[string]*pudb.ICache{
 			Class: class, Bookmark: "ps5",
 		},
 	})
-// 3 ways to monitor message(s):
+// 2 ways to monitor message(s):
 
 // 1. Auto get
 db.GoMonitor(ctx, func(result *pudb.IResult) {
@@ -34,13 +34,15 @@ db.GoMonitor(ctx, func(result *pudb.IResult) {
 			}
 		})
 
-// 2. channel+error
-db.SubscribeReady(ctx, class, bucket, branch, monitorObject, "ps5")
-// 3. channel
-db.Subscribe(ctx, class, bucket, branch, monitorObject, "youtube")
+// 2. channel
+ch:=db.Subscribe(ctx, class, bucket, branch, monitorObject, "youtube")
 
 
 // 2 ways to send message:
+
+
+
+
 // 1. single messsage
 db.Publish(ctx, class, bucket, branch, object, "ps5", nil, []byte("releases on nov 19 2026"))
 
@@ -67,5 +69,13 @@ db.Publish(ctx, class, bucket, branch, object, "ps5", nil, []byte("releases on n
 
 ## Note
 I am currently working more on the pulsar usage; I wrote what I feel like easy for me to use in one of my development project, I hope the same for you
+
+## Note
+do not use subscription and go-monitor for same url
+
+## Changes
+- go-monitor now supports the cache now perfectly
+- bookmark is taken seriously now
+
 Happy coding 🤗
 - va-db link: https://github.com/PaayasAkotkar/va-db

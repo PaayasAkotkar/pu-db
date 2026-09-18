@@ -12,7 +12,6 @@ import (
 	"github.com/apache/pulsar-client-go/pulsar"
 	"github.com/apache/pulsar-client-go/pulsaradmin"
 	"github.com/apache/pulsar-client-go/pulsaradmin/pkg/admin/config"
-	"github.com/apache/pulsar-client-go/pulsaradmin/pkg/utils"
 	"github.com/valkey-io/valkey-go"
 )
 
@@ -60,24 +59,20 @@ func Multi() {
 	bucket, branch := "example_bucket", "example_branch"
 	object, monitorObject := "example_object", "monitor_object"
 	class := pudb.RAM
+	var wg sync.WaitGroup
+	wg.Add(2)
 
-	// Admin lifecycle: bucket -> branch -> objects.
+	// Admin lifecycle: bucket -> branch -> objects
 	must := func(err error) {
 		if err != nil {
-			log.Fatal(err)
+			panic(err)
 		}
 	}
+
 	must(admin.PushBucket(ctx, &pudb.ICreateBucket{Bucket: bucket}))
 	must(admin.PushBranch(ctx, &pudb.ICreateBranch{Bucket: bucket, Branch: branch}))
 	must(admin.PushObject(ctx, &pudb.ICreateObject{Bucket: bucket, Branch: branch, Object: object, Class: class}))
 	must(admin.PushObject(ctx, &pudb.ICreateObject{Bucket: bucket, Branch: branch, Object: monitorObject, Class: class}))
-	log.Printf("buckets: %v", admin.PullBuckets(ctx))
-	log.Printf("branches: %v", admin.PullBranches(ctx, bucket))
-	log.Printf("branch topics: %v", admin.GetBranch(ctx, bucket, branch))
-	log.Printf("objects: %v", admin.PullObjects(ctx, bucket, branch))
-	log.Printf("bucket exists: %t", admin.DoesBucketExists(ctx, bucket))
-	log.Printf("branch exists: %t", admin.DoesBranchExists(ctx, bucket, branch))
-	log.Printf("object exists: %t", admin.DoesObjectExists(ctx, class, bucket, branch, object))
 
 	db.SetCache(map[string]*pudb.ICache{
 		"monitor": {
@@ -89,116 +84,58 @@ func Multi() {
 			Class: class, Bookmark: "subscriber_bookmark",
 		},
 	})
-	monitorDone := make(chan struct{}, 1)
-	broadcastDone := make(chan struct{}, 1)
-	subscriberDone := make(chan struct{}, 1)
-	var monitorOnce sync.Once
-	var subscriberOnce sync.Once
 
-	go func() {
-		db.GoMonitor(ctx, func(result *pudb.IResult) {
-			if result != nil && result.Ready {
-				p.Pen(pencil.Yellow, "monitor received: ", result.Pull)
-				monitorOnce.Do(func() { monitorDone <- struct{}{} })
-			}
-		})
-	}()
-
-	broadcastSubscription, broadcastReady := db.SubscribeReady(ctx, class, bucket, branch, monitorObject, "broadcast_subscriber")
-	go func() {
-		result, ok := <-broadcastSubscription
-		if ok && result != nil && result.Ready {
-			p.Pen(pencil.Green, "broadcast received: ", result.Pull)
-			broadcastDone <- struct{}{}
+	go db.GoMonitor(ctx, func(result *pudb.IResult) {
+		if result != nil && result.Ready {
+			p.Pen(pencil.Yellow, "monitor received data: ", result.Pull.Data)
 		}
-	}()
+	})
 
-	subscription, subscriberReady := db.SubscribeReady(ctx, class, bucket, branch, object, "subscriber_bookmark")
-	for name, ready := range map[string]<-chan error{
-		"broadcast":  broadcastReady,
-		"subscriber": subscriberReady,
-	} {
-		select {
-		case err := <-ready:
-			if err != nil {
-				log.Fatal(name, " consumer: ", err)
-			}
-		case <-ctx.Done():
-			log.Fatal(name, " consumer readiness timed out: ", ctx.Err())
-		}
-	}
+	//	ch := db.Subscribe(
+	//		ctx,
+	//		class,
+	//		bucket,
+	//		branch,
+	//		monitorObject,
+	//		"subscriber_bookmark",
+	//	)
+	//
+	//	go func() {
+	//		for {
+	//			select {
+	//			case result, ok := <-ch:
+	//				if !ok {
+	//					return
+	//				}
+	//
+	//				if result != nil && result.Pull != nil {
+	//					p.Pen(
+	//						pencil.Green,
+	//						"sub receive: ",
+	//						result.Pull.Data,
+	//					)
+	//				}
+	//
+	//			case <-ctx.Done():
+	//				return
+	//			}
+	//		}
+	//	}()
+	//
+	//	if err := db.Publish(ctx, class, bucket, branch, monitorObject, "subscriber_bookmark", nil, []byte("yo")); err != nil {
+	//		panic(err)
+	//	}
 
-	go func() {
-		defer func() { subscriberOnce.Do(func() { subscriberDone <- struct{}{} }) }()
-		select {
-		case result, ok := <-subscription:
-			if ok && result != nil {
-				p.Pen(pencil.Green, "subscribed: ", result.Pull)
-				subscriberDone <- struct{}{}
-			}
-		case <-ctx.Done():
-			log.Print("subscription timed out: ", ctx.Err())
-		}
-	}()
-
-	must(db.Publish(ctx, class, bucket, branch, object, "publisher", nil, []byte("published message")))
-
+	//
 	db.Broadcast(ctx, []*pudb.IBroadcast{
 		{
 			Bucket: bucket, Branch: branch, Object: monitorObject, Class: class,
-			Bookmark: "monitor_publisher", Data: []byte("broadcast message1"),
+			Bookmark: "monitor_bookmark", Data: []byte("broadcast message1"),
 		},
 		{
 			Bucket: bucket, Branch: branch, Object: monitorObject, Class: class,
-			Bookmark: "monitor_publisher", Data: []byte("broadcast message2"),
+			Bookmark: "monitor_bookmark", Data: []byte("broadcast message2"),
 		},
 	})
-
-	select {
-	case <-broadcastDone:
-	case <-ctx.Done():
-		log.Print("broadcast timed out: ", ctx.Err())
-	}
-	select {
-	case <-subscriberDone:
-	case <-ctx.Done():
-	}
-	select {
-	case <-monitorDone:
-	case <-ctx.Done():
-	}
-
-	if err := admin.ReadObjectStats(ctx, bucket, branch, object, func(stats utils.TopicStats) {
-		log.Printf("object stats: %+v", stats)
-	}); err != nil {
-		p.Pen(pencil.Red, "read stats: ", err)
-	}
-
-	db.ClearCache()
-
-	p.Pen(pencil.Blue, "before release: ")
-	for _, b := range db.Admin().PullBuckets(ctx) {
-		for _, br := range db.Admin().PullBranches(ctx, b) {
-			for _, o := range db.Admin().PullObjects(ctx, b, br) {
-				p.Pen(pencil.Green, "bucket: ", b)
-				p.Pen(pencil.Orange, "branch: ", br)
-				p.Pen(pencil.Violet, "object: ", o)
-			}
-		}
-	}
-	p.Pen(pencil.Red, "***end***")
-	db.Admin().Release(ctx)
-
-	p.Pen(pencil.Blue, "after release: ")
-	for _, b := range db.Admin().PullBuckets(ctx) {
-		for _, br := range db.Admin().PullBranches(ctx, b) {
-			for _, o := range db.Admin().PullObjects(ctx, b, br) {
-				p.Pen(pencil.Green, "bucket: ", b)
-				p.Pen(pencil.Orange, "branch: ", br)
-				p.Pen(pencil.Violet, "object: ", o)
-			}
-		}
-	}
-	p.Pen(pencil.Red, "***end***")
-	cancel()
+	wg.Wait()
 }

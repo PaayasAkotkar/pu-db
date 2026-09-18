@@ -110,7 +110,6 @@ func (p *IPubDBAdmin) PushBranch(ctx context.Context, c *ICreateBranch) error {
 	if !p.DoesBucketExists(ctx, c.Bucket) {
 		return fmt.Errorf("[bucket with name %s not found]", c.Bucket)
 	}
-
 	if p.DoesBranchExists(ctx, c.Bucket, c.Branch) {
 		log.Printf("[branch %s already exists]", c.Branch)
 		return nil
@@ -310,9 +309,9 @@ func (p *IPubDBAdmin) isObjectPartition(ctx context.Context, class Class, bucket
 	}
 	x, err := p.admin.Topics().GetPartitionedStats(*f, true)
 	if err != nil {
-		return false, err
+		return false, nil
 	}
-	return len(x.Partitions) > 0, err
+	return len(x.Partitions) > 0, nil
 }
 
 // DeleteObject deletes the topic
@@ -329,11 +328,26 @@ func (p *IPubDBAdmin) deleteObject(ctx context.Context, class Class, bucket, bra
 	if err != nil {
 		return err
 	}
-	ipat, err := p.isObjectPartition(ctx, class, bucket, branch, object)
+	subs, err := p.admin.Subscriptions().List(*f)
+	if err == nil {
+		for _, sub := range subs {
+			if derr := p.admin.Subscriptions().Delete(*f, sub); derr != nil {
+				log.Printf("[could not delete subscription %s on %s: %v]", sub, object, derr)
+			}
+		}
+	}
+
+	isPartitioned, err := p.isObjectPartition(ctx, class, bucket, branch, object)
 	if err != nil {
 		return err
 	}
-	return p.admin.Topics().Delete(*f, true, ipat)
+	return p.admin.Topics().Delete(*f, true, !isPartitioned)
+
+	//ipat, err := p.isObjectPartition(ctx, class, bucket, branch, object)
+	//if err != nil {
+	//	return err
+	//}
+	//return p.admin.Topics().Delete(*f, true, !ipat)
 }
 
 // DeleteBranch deletes the namespace
@@ -364,11 +378,15 @@ func (p *IPubDBAdmin) Release(ctx context.Context) {
 			for class, names := range objects {
 				for _, object := range names {
 					if err := p.deleteObject(ctx, class, bucket, branch, object); err != nil {
-						log.Println(err)
+						log.Printf("delete object failed %v", err)
 					}
 				}
 			}
 			if err := p.DeleteBranch(ctx, bucket, branch); err != nil {
+				if url, uerr := utils.GetNameSpaceName(bucket, branch); uerr == nil {
+					pr, np, lerr := p.admin.Topics().ListWithContext(ctx, *url) // or Topics().ListWithContext(ctx, *url)
+					log.Printf("[branch %s not empty] persistent=%v non-persistent=%v listErr=%v", branch, pr, np, lerr)
+				}
 				log.Println(err)
 			}
 		}

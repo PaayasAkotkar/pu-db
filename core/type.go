@@ -20,11 +20,12 @@ type IPuDB struct {
 }
 
 type IConfig struct {
-	Cache map[string]*ICache // key:params_required_to_build_url
-
-	AutoRelease bool // if auto-release once the message is reached we delete the topic from the disk
+	Cache       map[string]*ICache // key:params_required_to_build_url
+	Outcomes    int                // total number of channels to sub
+	AutoRelease bool               // if auto-release once the message is reached we delete the topic from the disk
 
 }
+
 type ICache struct {
 	Bucket, Branch, Object string
 	Class                  Class
@@ -33,6 +34,7 @@ type ICache struct {
 }
 
 func New(cli pulsar.Client, ad pulsaradmin.Client, c vadb.IConfig, n int) *IPuDB {
+
 	return &IPuDB{
 		cli: cli,
 		admin: &IPubDBAdmin{
@@ -44,7 +46,8 @@ func New(cli pulsar.Client, ad pulsaradmin.Client, c vadb.IConfig, n int) *IPuDB
 		},
 		va: vasdk1.New(c, n),
 		config: &IConfig{
-			Cache: make(map[string]*ICache),
+			Outcomes: 100,
+			Cache:    make(map[string]*ICache),
 		},
 	}
 }
@@ -63,3 +66,7 @@ func ma() {
 	cli.Subscribe(pulsar.ConsumerOptions{})
 	cli.CreateReader(pulsar.ReaderOptions{})
 }
+
+const (
+	PBookmark = "bookmark_name"
+)

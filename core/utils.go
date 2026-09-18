@@ -3,9 +3,11 @@ package pudb
 import (
 	"context"
 	"fmt"
+	"log"
 	"pu/app/common"
 	vadb "va/app/core"
 
+	"github.com/apache/pulsar-client-go/pulsar"
 	"github.com/apache/pulsar-client-go/pulsaradmin/pkg/utils"
 )
 
@@ -18,7 +20,6 @@ type Handler func(data *IResult)
 
 const (
 	MaxPendingMessages = 120
-	//WinBucket          = "windows"
 )
 
 func createURL(c Class, bucket, branch, object string) string {
@@ -59,4 +60,89 @@ func (p *IPubDBAdmin) createObject(ctx context.Context, domain string, c *ICreat
 		}
 	}
 	return nil
+}
+
+// subscribeReady subscribes to a topic and reports when the broker consumer is ready.
+func (p *IPuDB) subscribeReady(
+	ctx context.Context,
+	c Class,
+	bucket, branch, object, bookmark string,
+) chan *IResult {
+	out := make(chan *IResult, 1)
+
+	go func() {
+		defer close(out)
+
+		url := createURL(c, bucket, branch, object)
+		if url == common.StringSentinel {
+			return
+		}
+
+		consumer, err := p.cli.Subscribe(pulsar.ConsumerOptions{
+			Topic:                       url,
+			SubscriptionName:            bookmark,
+			SubscriptionInitialPosition: pulsar.SubscriptionPositionEarliest,
+			Type:                        pulsar.Failover,
+		})
+		if err != nil {
+			log.Printf("subscribe to %s failed: %v", url, err)
+			return
+		}
+		defer consumer.Close()
+
+		for {
+			message, err := consumer.Receive(ctx)
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+
+				log.Printf("receive from %s failed: %v", url, err)
+				return
+			}
+
+			if message == nil {
+				continue
+			}
+
+			actualBookmark := message.Properties()[PBookmark]
+			log.Println("goin well...")
+
+			if actualBookmark != bookmark {
+				log.Println("bookmark not matched...")
+				if err := consumer.Ack(message); err != nil {
+					log.Printf("ack unrelated message failed: %v", err)
+					return
+				}
+
+				continue
+			}
+
+			result := &IResult{
+				Ready: true,
+				Pull: &vadb.IPull{
+					Bucket: bucket,
+					Branch: branch,
+					Object: object,
+					Data:   string(message.Payload()),
+					Fresh:  true,
+					Mode:   vadb.MAP,
+				},
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+
+			case out <- result:
+			}
+
+			if err := consumer.Ack(message); err != nil {
+				log.Printf("ack message failed: %v", err)
+				return
+			}
+		}
+	}()
+
+	return out
 }
