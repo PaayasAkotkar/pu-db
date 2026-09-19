@@ -62,6 +62,8 @@ type IBroadcast struct {
 
 // Broadcast publihse list of messages
 func (p *IPuDB) Broadcast(ctx context.Context, c []*IBroadcast) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	go func() {
 		for _, r := range c {
 			//ub := fmt.Sprintf("%s_%d", r.Bookmark, i)
@@ -79,7 +81,8 @@ func (p *IPuDB) Broadcast(ctx context.Context, c []*IBroadcast) {
 // Subscribe returns the channel
 // note: it is like pooling so yeah be-careful with it
 // note: without valkey
-func (p *IPuDB) Subscribe(ctx context.Context, co []FnConsumerOption, propertyControl func(properties map[string]string) error, c Class, bucket, branch, object, bookmark string) chan *IResult {
+// explicitly uses the shadow ctx so that in-case to avoid race b/w go-monitor and subscribe
+func (p *IPuDB) Subscribe(ctx context.Context, co []FnConsumerOption, propertyControl func(properties map[string]string) error, c Class, bucket, branch, object, bookmark string) (chan *IResult, func()) {
 	return p.subscribeReady(ctx, co, propertyControl, c, bucket, branch, object, bookmark)
 }
 
@@ -89,45 +92,62 @@ func (p *IPuDB) Subscribe(ctx context.Context, co []FnConsumerOption, propertyCo
 func (p *IPuDB) GoMonitor(ctx context.Context, co []FnConsumerOption, propertyControl func(properties map[string]string) error, handler Handler) {
 	for _, cache := range p.config.Cache {
 		param := cache
+		results := p.va.TSubscribe(ctx, p.config.Outcomes, vadb.MAP,
+			param.Bucket, param.Branch, param.Object)
 
-		go func(param *ICache) {
-			url := createURL(
-				param.Class,
-				param.Bucket,
-				param.Branch,
+		if cache.Manual {
+			continue
+		}
+		url := createURL(param.Class, param.Bucket, param.Branch, param.Object)
+
+		po := pulsar.ConsumerOptions{
+			Topic:            url,
+			SubscriptionName: param.Bookmark,
+			Type:             pulsar.Failover,
+		}
+
+		for _, fn := range co {
+			fn(&po)
+		}
+		po.Topic = url
+		po.SubscriptionName = param.Bookmark
+
+		consumer, err := p.cli.Subscribe(po)
+		if err != nil {
+			log.Printf(
+				"subscribe to %s: %v",
 				param.Object,
+				err,
 			)
+			continue
+		}
 
-			po := pulsar.ConsumerOptions{
-				Topic:            url,
-				SubscriptionName: param.Bookmark,
-				Type:             pulsar.Failover,
-			}
+		go func(param *ICache, consumer pulsar.Consumer) {
 
-			for _, fn := range co {
-				fn(&po)
-			}
-			po.Topic = url
-			po.SubscriptionName = param.Bookmark
-
-			consumer, err := p.cli.Subscribe(po)
-
-			if err != nil {
-				log.Printf(
-					"subscribe to %s: %v",
-					param.Object,
-					err,
-				)
-				return
-			}
 			defer consumer.Close()
-
 			for {
 				message, err := consumer.Receive(ctx)
 
-				if err := propertyControl(message.Properties()); err != nil {
-					log.Println(err)
-					continue
+				if err != nil {
+					if er := ctx.Err(); er != nil {
+						log.Println(er)
+						return
+					}
+					if pErr, ok := err.(interface{ Result() pulsar.Result }); ok {
+						if r := pErr.Result(); r == pulsar.ConsumerClosed || r == pulsar.AlreadyClosedError {
+							log.Println(r)
+							return
+						}
+					}
+					log.Printf("receive from %s failed: %v", param.Object, err)
+					return
+				}
+
+				if propertyControl != nil {
+					if err := propertyControl(message.Properties()); err != nil {
+						log.Println(err)
+						continue
+					}
 				}
 
 				bookmark := message.Properties()[PBookmark]
@@ -142,15 +162,6 @@ func (p *IPuDB) GoMonitor(ctx context.Context, co []FnConsumerOption, propertyCo
 					continue
 				}
 
-				if err != nil {
-					if ctx.Err() != nil {
-						return
-					}
-
-					log.Println("pulsar receive:", err)
-					return
-				}
-
 				p.va.TPublish(ctx, vadb.MAP, &vadb.IPush{
 					Bucket: param.Bucket,
 					Branch: param.Branch,
@@ -163,17 +174,17 @@ func (p *IPuDB) GoMonitor(ctx context.Context, co []FnConsumerOption, propertyCo
 					return
 				}
 			}
-		}(param)
+		}(param, consumer)
 
-		go func(param *ICache) {
-			results := p.va.TSubscribe(
-				ctx,
-				p.config.Outcomes,
-				vadb.MAP,
-				param.Bucket,
-				param.Branch,
-				param.Object,
-			)
+		go func(results chan *vadb.IPull) {
+			//results := p.va.TSubscribe(
+			//	ctx,
+			//	p.config.Outcomes,
+			//	vadb.MAP,
+			//	param.Bucket,
+			//	param.Branch,
+			//	param.Object,
+			//)
 
 			for {
 				select {
@@ -195,7 +206,7 @@ func (p *IPuDB) GoMonitor(ctx context.Context, co []FnConsumerOption, propertyCo
 					})
 				}
 			}
-		}(param)
+		}(results)
 	}
 }
 

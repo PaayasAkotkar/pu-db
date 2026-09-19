@@ -20,9 +20,8 @@ import (
 // make sure to comment some in-order to view result properly
 // note: example is written by vs-code copilet so shotout to that
 func Multi() {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
 	valkeyClient, err := valkey.NewClient(valkey.ClientOption{
 		InitAddress: []string{"127.0.0.1:6379"},
 	})
@@ -61,6 +60,7 @@ func Multi() {
 	class := pudb.RAM
 	var wg sync.WaitGroup
 	wg.Add(2)
+	defer pulsarClient.Close()
 
 	// Admin lifecycle: bucket -> branch -> objects
 	must := func(err error) {
@@ -79,16 +79,13 @@ func Multi() {
 			Bucket: bucket, Branch: branch, Object: monitorObject,
 			Class: class, Bookmark: "monitor_bookmark",
 		},
-		"subscriber": {
-			Bucket: bucket, Branch: branch, Object: object,
-			Class: class, Bookmark: "subscriber_bookmark",
-		},
 	})
 
-	go db.GoMonitor(ctx, []pudb.FnConsumerOption{
+	db.GoMonitor(ctx, []pudb.FnConsumerOption{
 		func(co *pulsar.ConsumerOptions) {
 		},
 	}, func(properties map[string]string) error {
+		p.Pen(pencil.Orange, "properties: ", properties)
 		return nil
 	}, func(result *pudb.IResult) {
 		if result != nil && result.Ready {
@@ -96,8 +93,10 @@ func Multi() {
 		}
 	})
 
-	//	ch := db.Subscribe(
+	//	ch, stop := db.Subscribe(
 	//		ctx,
+	//		nil,
+	//		nil,
 	//		class,
 	//		bucket,
 	//		branch,
@@ -122,20 +121,22 @@ func Multi() {
 	//				}
 	//
 	//			case <-ctx.Done():
+	//				stop()
 	//				return
 	//			}
 	//		}
 	//	}()
 	//
-	//	if err := db.Publish(ctx, class, bucket, branch, monitorObject, "subscriber_bookmark", nil, []byte("yo")); err != nil {
+	//	if err := db.Publish(ctx, class, bucket, branch, monitorObject, "subscriber_bookmark", nil, []byte("yo"), nil, nil); err != nil {
 	//		panic(err)
 	//	}
 
-	//
 	db.Broadcast(ctx, []*pudb.IBroadcast{
 		{
 			Bucket: bucket, Branch: branch, Object: monitorObject, Class: class,
 			Bookmark: "monitor_bookmark", Data: []byte("broadcast message1"),
+			FnPO: []pudb.FnProducerOption{},
+			FnPm: []pudb.FnProducerMessage{},
 		},
 		{
 			Bucket: bucket, Branch: branch, Object: monitorObject, Class: class,

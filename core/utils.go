@@ -67,95 +67,103 @@ func (p *IPuDB) subscribeReady(
 	ctx context.Context,
 	co []FnConsumerOption,
 	propertyControl func(properties map[string]string) error, c Class,
-
 	bucket, branch, object, bookmark string,
-) chan *IResult {
-	out := make(chan *IResult, 1)
+) (chan *IResult, func()) {
+	out := make(chan *IResult, 1222)
 
-	go func() {
-		defer close(out)
+	url := createURL(c, bucket, branch, object)
+	if url == common.StringSentinel {
+		close(out)
+		return out, func() {}
+	}
 
-		url := createURL(c, bucket, branch, object)
-		if url == common.StringSentinel {
-			return
-		}
-		_co := pulsar.ConsumerOptions{
-			Topic:                       url,
-			SubscriptionName:            bookmark,
-			SubscriptionInitialPosition: pulsar.SubscriptionPositionEarliest,
-			Type:                        pulsar.Failover,
-		}
-		for _, fn := range co {
-			fn(&_co)
-		}
-		_co.Topic = url
-		_co.SubscriptionName = bookmark
+	_co := pulsar.ConsumerOptions{Topic: url, SubscriptionName: bookmark, Type: pulsar.Failover}
+	for _, fn := range co {
+		fn(&_co)
+	}
+	_co.Topic, _co.SubscriptionName = url, bookmark
 
-		consumer, err := p.cli.Subscribe(_co)
-		if err != nil {
-			log.Printf("subscribe to %s failed: %v", url, err)
-			return
-		}
-		defer consumer.Close()
+	consumer, err := p.cli.Subscribe(_co)
+	if err != nil {
+		log.Printf("subscribe to %s failed: %v", url, err)
+		close(out)
+		return out, func() {}
+	}
+	_ctx, stop := context.WithCancel(ctx)
 
+	listen := func(consumer pulsar.Consumer) {
 		for {
-			message, err := consumer.Receive(ctx)
+			message, err := consumer.Receive(_ctx)
 			if err != nil {
-				if ctx.Err() != nil {
-					return
-				}
-
-				log.Printf("receive from %s failed: %v", url, err)
 				return
 			}
 
-			if message == nil {
-				continue
+			if propertyControl != nil {
+				if err := propertyControl(message.Properties()); err != nil {
+					log.Println(err)
+					consumer.Nack(message)
+					continue
+				}
 			}
 
-			if err := propertyControl(message.Properties()); err != nil {
-				log.Println(err)
-				continue
-			}
-
-			b := message.Properties()[PBookmark]
-			log.Println("goin well...")
-
-			if b != bookmark {
-				log.Println("bookmark not matched...")
+			if message.Properties()[PBookmark] != bookmark {
 				if err := consumer.Ack(message); err != nil {
 					log.Printf("ack unrelated message failed: %v", err)
-					return
 				}
-
 				continue
 			}
 
 			result := &IResult{
 				Ready: true,
 				Pull: &vadb.IPull{
-					Bucket: bucket,
-					Branch: branch,
-					Object: object,
-					Data:   string(message.Payload()),
-					Fresh:  true,
-					Mode:   vadb.MAP,
+					Bucket: bucket, Branch: branch, Object: object,
+					Data: string(message.Payload()), Fresh: true, Mode: vadb.MAP,
 				},
 			}
-
 			select {
-			case <-ctx.Done():
-				return
-
 			case out <- result:
+			case <-_ctx.Done():
+				return
 			}
 
 			if err := consumer.Ack(message); err != nil {
 				log.Printf("ack message failed: %v", err)
-				return
+			}
+		}
+	}
+
+	go func() {
+		defer close(out)
+
+		for {
+			listen(consumer)
+			consumer.Close()
+
+			if _ctx.Err() != nil {
+				return // stop() or ctx: intended, stay quiet
+			}
+			log.Printf("consumer for %s closed unexpectedly, resubscribing", url)
+
+			for {
+
+				if consumer, err = p.cli.Subscribe(_co); err == nil {
+					break
+				}
+				log.Printf("resubscribe %s failed: %v", url, err)
 			}
 		}
 	}()
 
-	return out
+	return out, stop
+}
+func (p *IPuDB) found(c Class, bucket, branch, object, bookmark string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, e := range p.config.Cache {
+		if e.Class == c && e.Bucket == bucket && e.Branch == branch &&
+			e.Object == object && e.Bookmark == bookmark {
+			return true
+		}
+	}
+	return false
 }

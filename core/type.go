@@ -31,6 +31,7 @@ type ICache struct {
 	Class                  Class
 	Bookmark               string // subscription
 	Property               map[string]string
+	Manual                 bool
 }
 
 func New(cli pulsar.Client, ad pulsaradmin.Client, c vadb.IConfig, n int) *IPuDB {
