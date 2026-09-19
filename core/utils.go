@@ -65,7 +65,9 @@ func (p *IPubDBAdmin) createObject(ctx context.Context, domain string, c *ICreat
 // subscribeReady subscribes to a topic and reports when the broker consumer is ready.
 func (p *IPuDB) subscribeReady(
 	ctx context.Context,
-	c Class,
+	co []FnConsumerOption,
+	propertyControl func(properties map[string]string) error, c Class,
+
 	bucket, branch, object, bookmark string,
 ) chan *IResult {
 	out := make(chan *IResult, 1)
@@ -77,13 +79,19 @@ func (p *IPuDB) subscribeReady(
 		if url == common.StringSentinel {
 			return
 		}
-
-		consumer, err := p.cli.Subscribe(pulsar.ConsumerOptions{
+		_co := pulsar.ConsumerOptions{
 			Topic:                       url,
 			SubscriptionName:            bookmark,
 			SubscriptionInitialPosition: pulsar.SubscriptionPositionEarliest,
 			Type:                        pulsar.Failover,
-		})
+		}
+		for _, fn := range co {
+			fn(&_co)
+		}
+		_co.Topic = url
+		_co.SubscriptionName = bookmark
+
+		consumer, err := p.cli.Subscribe(_co)
 		if err != nil {
 			log.Printf("subscribe to %s failed: %v", url, err)
 			return
@@ -105,10 +113,15 @@ func (p *IPuDB) subscribeReady(
 				continue
 			}
 
-			actualBookmark := message.Properties()[PBookmark]
+			if err := propertyControl(message.Properties()); err != nil {
+				log.Println(err)
+				continue
+			}
+
+			b := message.Properties()[PBookmark]
 			log.Println("goin well...")
 
-			if actualBookmark != bookmark {
+			if b != bookmark {
 				log.Println("bookmark not matched...")
 				if err := consumer.Ack(message); err != nil {
 					log.Printf("ack unrelated message failed: %v", err)

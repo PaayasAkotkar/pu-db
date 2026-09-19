@@ -66,6 +66,7 @@ db.Publish(ctx, class, bucket, branch, object, "ps5", nil, []byte("releases on n
 | full url to pull the result without def knowledge                  | now use the bucket,branch,object and a bookmark to address the result & pull it                     |
 | No clear cache as a microservice to load the result in cache first | now auto pull the result & returns the result                                                       |
 | subscribe to many topics at once but has to manage the async call  | set the structure one time and simply use the GoMonitor without needing to implement complex result |
+| manage producer for each data puublish| simply add the config just like any other publish func
 
 ## Note
 I am currently working more on the pulsar usage; I wrote what I feel like easy for me to use in one of my development project, I hope the same for you

@@ -85,7 +85,12 @@ func Multi() {
 		},
 	})
 
-	go db.GoMonitor(ctx, func(result *pudb.IResult) {
+	go db.GoMonitor(ctx, []pudb.FnConsumerOption{
+		func(co *pulsar.ConsumerOptions) {
+		},
+	}, func(properties map[string]string) error {
+		return nil
+	}, func(result *pudb.IResult) {
 		if result != nil && result.Ready {
 			p.Pen(pencil.Yellow, "monitor received data: ", result.Pull.Data)
 		}

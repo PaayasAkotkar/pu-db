@@ -9,27 +9,44 @@ import (
 	"github.com/apache/pulsar-client-go/pulsar"
 )
 
+type FnProducerOption func(*pulsar.ProducerOptions)
+type FnProducerMessage func(*pulsar.ProducerMessage)
+type FnConsumerOption func(*pulsar.ConsumerOptions)
+
 // Publish send the data
-func (p *IPuDB) Publish(ctx context.Context, c Class, bucket, branch, object, bookmark string, properties map[string]string, value []byte) error {
+func (p *IPuDB) Publish(ctx context.Context, c Class, bucket, branch, object, bookmark string, properties map[string]string, value []byte, po []FnProducerOption, pm []FnProducerMessage) error {
 	url := createURL(c, bucket, branch, object)
 	if properties == nil {
 		properties = make(map[string]string, 1)
 	}
 	properties[PBookmark] = bookmark
-	pr, err := p.cli.CreateProducer(pulsar.ProducerOptions{
+	opt := pulsar.ProducerOptions{
 		Topic:              url,
 		Properties:         properties,
 		MaxPendingMessages: MaxPendingMessages,
-	})
+	}
+	for _, fn := range po {
+		fn(&opt)
+	}
+	opt.Topic = url // shadowing
+
+	pr, err := p.cli.CreateProducer(opt)
+
 	if err != nil {
 		return err
 	}
 	defer pr.Close()
 
-	_, err = pr.Send(ctx, &pulsar.ProducerMessage{
+	mp := pulsar.ProducerMessage{
 		Payload:    value,
 		Properties: properties,
-	})
+	}
+
+	for _, fn := range pm {
+		fn(&mp)
+	}
+	mp.Payload = value
+	_, err = pr.Send(ctx, &mp)
 	return err
 }
 
@@ -39,6 +56,8 @@ type IBroadcast struct {
 	Bookmark               string // subscription
 	Property               map[string]string
 	Data                   []byte
+	FnPO                   []FnProducerOption
+	FnPm                   []FnProducerMessage
 }
 
 // Broadcast publihse list of messages
@@ -48,7 +67,7 @@ func (p *IPuDB) Broadcast(ctx context.Context, c []*IBroadcast) {
 			//ub := fmt.Sprintf("%s_%d", r.Bookmark, i)
 			ub := r.Bookmark
 
-			if err := p.Publish(ctx, r.Class, r.Bucket, r.Branch, r.Object, ub, r.Property, r.Data); err != nil {
+			if err := p.Publish(ctx, r.Class, r.Bucket, r.Branch, r.Object, ub, r.Property, r.Data, r.FnPO, r.FnPm); err != nil {
 				log.Printf("broadcast %s/%s/%s failed: %v", r.Bucket, r.Branch, r.Object, err)
 				continue
 			}
@@ -60,13 +79,14 @@ func (p *IPuDB) Broadcast(ctx context.Context, c []*IBroadcast) {
 // Subscribe returns the channel
 // note: it is like pooling so yeah be-careful with it
 // note: without valkey
-func (p *IPuDB) Subscribe(ctx context.Context, c Class, bucket, branch, object, bookmark string) chan *IResult {
-	return p.subscribeReady(ctx, c, bucket, branch, object, bookmark)
+func (p *IPuDB) Subscribe(ctx context.Context, co []FnConsumerOption, propertyControl func(properties map[string]string) error, c Class, bucket, branch, object, bookmark string) chan *IResult {
+	return p.subscribeReady(ctx, co, propertyControl, c, bucket, branch, object, bookmark)
 }
 
 // GoMonitor uses the pushed cache to pull the result
 // note: we use the heap one time set and ready to go
-func (p *IPuDB) GoMonitor(ctx context.Context, handler Handler) {
+// propertyControl: control the writing of property one time than modfiy each time
+func (p *IPuDB) GoMonitor(ctx context.Context, co []FnConsumerOption, propertyControl func(properties map[string]string) error, handler Handler) {
 	for _, cache := range p.config.Cache {
 		param := cache
 
@@ -78,13 +98,19 @@ func (p *IPuDB) GoMonitor(ctx context.Context, handler Handler) {
 				param.Object,
 			)
 
-			consumer, err := p.cli.Subscribe(
-				pulsar.ConsumerOptions{
-					Topic:            url,
-					SubscriptionName: param.Bookmark,
-					Type:             pulsar.Failover,
-				},
-			)
+			po := pulsar.ConsumerOptions{
+				Topic:            url,
+				SubscriptionName: param.Bookmark,
+				Type:             pulsar.Failover,
+			}
+
+			for _, fn := range co {
+				fn(&po)
+			}
+			po.Topic = url
+			po.SubscriptionName = param.Bookmark
+
+			consumer, err := p.cli.Subscribe(po)
 
 			if err != nil {
 				log.Printf(
@@ -98,8 +124,15 @@ func (p *IPuDB) GoMonitor(ctx context.Context, handler Handler) {
 
 			for {
 				message, err := consumer.Receive(ctx)
+
+				if err := propertyControl(message.Properties()); err != nil {
+					log.Println(err)
+					continue
+				}
+
 				bookmark := message.Properties()[PBookmark]
 				log.Println("going well...")
+
 				if bookmark != param.Bookmark {
 					log.Println("yes:= ", string(message.Payload()))
 					if err := consumer.Ack(message); err != nil {
